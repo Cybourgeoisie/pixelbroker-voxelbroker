@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Spritesheet to Voxel Character Converter</title>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.149/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three/examples/js/utils/BufferGeometryUtils.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+        #controls {
+            margin-bottom: 20px;
+            background-color: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        #workCanvas {
+            display: none;
+        }
+        #preview {
+            border: 1px solid #444;
+            margin-top: 10px;
+            background-color: #2a2a2a;
+        }
+        .input-group {
+            margin: 10px 0;
+        }
+        input[type="file"], input[type="number"] {
+            background-color: #333;
+            color: #fff;
+            border: 1px solid #444;
+            padding: 5px;
+            border-radius: 4px;
+        }
+        button {
+            background-color: #444;
+            color: #fff;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        button:hover {
+            background-color: #555;
+        }
+        label {
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <div class="input-group">
+            <label>Spritesheet: </label>
+            <input type="file" id="spritesheetInput" accept="image/*">
+            <button id="preloadButton">Preload Test Image</button>
+        </div>
+        <div class="input-group">
+            <label>Depth (number of voxels): </label>
+            <input type="number" id="depthInput" value="6" min="1" max="20">
+        </div>
+    </div>
+    
+    <canvas id="workCanvas"></canvas>
+    <div id="preview"></div>
+
+    <script>
+        let scene, camera, renderer, controls;
+        const SPRITE_ROWS = 8;
+        const SPRITE_COLS = 6;
+        
+        function initThreeJS() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a1a);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer();
+            renderer.setSize(window.innerWidth * 0.8, window.innerHeight * 0.8);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            
+            document.getElementById('preview').innerHTML = '';
+            document.getElementById('preview').appendChild(renderer.domElement);
+            
+            // Lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.75);
+            scene.add(ambientLight);
+            
+            const pointLight = new THREE.PointLight(0xffffff, 1, 100);
+            pointLight.position.set(10, 20, -20);
+            pointLight.castShadow = true;
+            scene.add(pointLight);
+            
+            // Set up camera and controls after scene is created
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false;
+            
+            // Default camera position - will be adjusted when model is loaded
+            camera.position.set(0, 0, 50);
+            
+            animate();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        function getSpritesheetSlice(ctx, img, row, col, flip = false) {
+            const spriteWidth = img.width / SPRITE_COLS;
+            const spriteHeight = img.height / SPRITE_ROWS;
+            const x = col * spriteWidth;
+            const y = row * spriteHeight;
+            
+            if (!flip) {
+                return ctx.getImageData(x, y, spriteWidth, spriteHeight);
+            }
+            
+            // For flipped images, create a temporary canvas to flip the image
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCanvas.width = spriteWidth;
+            tempCanvas.height = spriteHeight;
+            
+            // Draw the section we want to flip
+            tempCtx.translate(spriteWidth, 0);
+            tempCtx.scale(-1, 1);
+            tempCtx.drawImage(img, 
+                x, y, spriteWidth, spriteHeight,  // source coordinates
+                0, 0, spriteWidth, spriteHeight   // destination coordinates
+            );
+            
+            return tempCtx.getImageData(0, 0, spriteWidth, spriteHeight);
+        }
+
+        function createVoxelModel(frontData, backData, depth) {
+            const voxels = [];
+            const spriteWidth = frontData.width;
+            const spriteHeight = frontData.height;
+            
+            // Helper to get pixel data
+            function getPixel(imageData, x, y) {
+                const index = (y * imageData.width + x) * 4;
+                return {
+                    r: imageData.data[index],
+                    g: imageData.data[index + 1],
+                    b: imageData.data[index + 2],
+                    a: imageData.data[index + 3]
+                };
+            }
+            
+            // Create voxels for each pixel
+            for (let y = 0; y < spriteHeight; y++) {
+                for (let x = 0; x < spriteWidth; x++) {
+                    const frontPixel = getPixel(frontData, x, y);
+                    const backPixel = getPixel(backData, x, y);
+                    
+                    if (frontPixel.a > 0 || backPixel.a > 0) {
+                        // Interpolate through depth
+                        for (let z = 0; z < depth; z++) {
+                            const t = z / (depth - 1);
+                            const pixel = frontPixel.a === 0 ? backPixel : 
+                                        backPixel.a === 0 ? frontPixel :
+                                        {
+                                            r: Math.round(frontPixel.r * (1 - t) + backPixel.r * t),
+                                            g: Math.round(frontPixel.g * (1 - t) + backPixel.g * t),
+                                            b: Math.round(frontPixel.b * (1 - t) + backPixel.b * t),
+                                            a: Math.round(frontPixel.a * (1 - t) + backPixel.a * t)
+                                        };
+                            
+                            if (pixel.a > 0) {
+                                voxels.push({
+                                    x: x,
+                                    y: -y,
+                                    z: z,
+                                    color: `rgba(${pixel.r}, ${pixel.g}, ${pixel.b}, ${pixel.a / 255})`
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            
+            return voxels;
+        }
+
+        function createVoxelMesh(voxels) {
+            const geometries = [];
+            const matrix = new THREE.Matrix4();
+            const color = new THREE.Color();
+
+            // Calculate the center of the model
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+            let minZ = Infinity, maxZ = -Infinity;
+
+            voxels.forEach(voxel => {
+                minX = Math.min(minX, voxel.x);
+                maxX = Math.max(maxX, voxel.x);
+                minY = Math.min(minY, voxel.y);
+                maxY = Math.max(maxY, voxel.y);
+                minZ = Math.min(minZ, voxel.z);
+                maxZ = Math.max(maxZ, voxel.z);
+            });
+
+            const centerX = (minX + maxX) / 2;
+            const centerY = (minY + maxY) / 2;
+            const centerZ = (minZ + maxZ) / 2;
+
+            voxels.forEach(voxel => {
+                const geometry = new THREE.BoxGeometry(1, 1, 1);
+                const voxelColor = new THREE.Color(voxel.color);
+                
+                // Center the model around origin
+                matrix.makeTranslation(
+                    voxel.x - centerX, 
+                    voxel.y - centerY, 
+                    voxel.z - centerZ
+                );
+                
+                const positionAttribute = geometry.getAttribute('position');
+                const colors = new Float32Array(positionAttribute.count * 3);
+                color.set(voxelColor);
+                
+                for (let i = 0; i < colors.length; i += 3) {
+                    colors[i] = color.r;
+                    colors[i + 1] = color.g;
+                    colors[i + 2] = color.b;
+                }
+                
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+                geometry.applyMatrix4(matrix);
+                geometries.push(geometry);
+            });
+
+            const mergedGeometry = THREE.BufferGeometryUtils.mergeBufferGeometries(geometries, false);
+            const material = new THREE.MeshLambertMaterial({ vertexColors: true });
+            const mesh = new THREE.Mesh(mergedGeometry, material);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+
+            // Calculate model dimensions for camera positioning
+            const size = new THREE.Vector3(
+                maxX - minX,
+                maxY - minY,
+                maxZ - minZ
+            );
+            
+            // Store size and center information on the mesh for camera setup
+            mesh.userData.size = size;
+            
+            return mesh;
+        }
+
+        document.getElementById('spritesheetInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            
+            reader.onload = function(event) {
+                const img = new Image();
+                img.onload = function() {
+                    const canvas = document.getElementById('workCanvas');
+                    const ctx = canvas.getContext('2d');
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    ctx.drawImage(img, 0, 0);
+
+                    // Get front (5th row, 1st column) and back (7th row, 1st column) views
+                    const frontSlice = getSpritesheetSlice(ctx, img, 4, 0, false); // 5th row (index 4)
+                    const backSlice = getSpritesheetSlice(ctx, img, 6, 0, true);   // 7th row (index 6), flipped horizontally
+                    
+                    const depth = parseInt(document.getElementById('depthInput').value);
+                    const voxels = createVoxelModel(frontSlice, backSlice, depth);
+                    
+                    // Initialize Three.js scene if not already done
+                    if (!scene) {
+                        initThreeJS();
+                    } else {
+                        // Clear existing mesh
+                        while(scene.children.length > 0){ 
+                            scene.remove(scene.children[0]); 
+                        }
+                    }
+                    
+                    const voxelMesh = createVoxelMesh(voxels);
+                    scene.add(voxelMesh);
+
+                    // Calculate optimal camera position based on model size
+                    const size = voxelMesh.userData.size;
+                    const maxDimension = Math.max(size.x, size.y, size.z);
+                    const fov = camera.fov * (Math.PI / 180);
+                    const cameraDistance = Math.abs(maxDimension / Math.sin(fov / 2)) * 1.5; // 1.5 for some padding
+
+                    camera.position.set(cameraDistance * 0.5, cameraDistance * 0.5, cameraDistance * 0.5);
+                    camera.lookAt(0, 0, 0);
+                    controls.target.set(0, 0, 0);
+                    controls.update();
+                };
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        document.getElementById('depthInput').addEventListener('change', function() {
+            // Trigger spritesheet processing again if an image is loaded
+            const spritesheetInput = document.getElementById('spritesheetInput');
+            if (spritesheetInput.files.length > 0) {
+                const event = new Event('change');
+                spritesheetInput.dispatchEvent(event);
+            }
+        });
+
+        // Add preload button functionality
+        document.getElementById('preloadButton').addEventListener('click', function() {
+            // Create an Image object and load the test image
+            const img = new Image();
+            img.onload = function() {
+                const canvas = document.getElementById('workCanvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+
+                // Get front and back views
+                const frontSlice = getSpritesheetSlice(ctx, img, 4, 0, false);
+                const backSlice = getSpritesheetSlice(ctx, img, 6, 0, true);
+                
+                const depth = parseInt(document.getElementById('depthInput').value);
+                const voxels = createVoxelModel(frontSlice, backSlice, depth);
+                
+                // Initialize Three.js scene if not already done
+                if (!scene) {
+                    initThreeJS();
+                } else {
+                    // Clear existing mesh
+                    while(scene.children.length > 0){ 
+                        scene.remove(scene.children[0]); 
+                    }
+                }
+                
+                const voxelMesh = createVoxelMesh(voxels);
+                scene.add(voxelMesh);
+            };
+            img.src = 'sheets/3.png';
+        });
+    </script>
+</body>
+</html>
