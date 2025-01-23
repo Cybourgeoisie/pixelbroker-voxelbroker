@@ -57,13 +57,17 @@
 <body>
     <div id="controls">
         <div class="input-group">
-            <label>Spritesheet: </label>
-            <input type="file" id="spritesheetInput" accept="image/*">
-            <button id="preloadButton">Preload Test Image</button>
+            <label>Broker ID (0-10000): </label>
+            <input type="number" id="brokerIdInput" value="0" min="0" max="10000">
+            <button id="loadBrokerButton">Load Broker</button>
         </div>
         <div class="input-group">
             <label>Depth (number of voxels): </label>
-            <input type="number" id="depthInput" value="6" min="1" max="20">
+            <input type="number" id="depthInput" value="4" min="1" max="20">
+        </div>
+        <div class="input-group">
+            <label>Animation: </label>
+            <button id="toggleAnimation">Toggle Walking</button>
         </div>
     </div>
     
@@ -72,6 +76,10 @@
 
     <script>
         let scene, camera, renderer, controls;
+        let isWalking = false;
+        let currentFrame = 0;
+        let animationInterval;
+        const FRAME_RATE = 4; // frames per second
         const SPRITE_ROWS = 8;
         const SPRITE_COLS = 6;
         
@@ -260,96 +268,116 @@
             return mesh;
         }
 
-        document.getElementById('spritesheetInput').addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            const reader = new FileReader();
+        function processSpritesheetFrame(img, frameIndex = null) {
+            const canvas = document.getElementById('workCanvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            ctx.drawImage(img, 0, 0);
+
+            let frontSlice, backSlice;
             
-            reader.onload = function(event) {
-                const img = new Image();
-                img.onload = function() {
-                    const canvas = document.getElementById('workCanvas');
-                    const ctx = canvas.getContext('2d');
-                    canvas.width = img.width;
-                    canvas.height = img.height;
-                    ctx.drawImage(img, 0, 0);
+            if (isWalking && frameIndex !== null) {
+                // Walking animation - use row 1 for front (index 0) and row 3 for back (index 2)
+                frontSlice = getSpritesheetSlice(ctx, img, 0, frameIndex, false);
+                backSlice = getSpritesheetSlice(ctx, img, 2, frameIndex, true);
+            } else {
+                // Standing pose - use row 5 for front (index 4) and row 7 for back (index 6)
+                frontSlice = getSpritesheetSlice(ctx, img, 4, 0, false);
+                backSlice = getSpritesheetSlice(ctx, img, 6, 0, true);
+            }
+            
+            const depth = parseInt(document.getElementById('depthInput').value);
+            const voxels = createVoxelModel(frontSlice, backSlice, depth);
+            
+            // Initialize Three.js scene if not already done
+            if (!scene) {
+                initThreeJS();
+            } else {
+                // Clear existing mesh but preserve lights
+                const lights = scene.children.filter(child => child instanceof THREE.Light);
+                scene.clear();
+                lights.forEach(light => scene.add(light));
+            }
+            
+            const voxelMesh = createVoxelMesh(voxels);
+            scene.add(voxelMesh);
 
-                    // Get front (5th row, 1st column) and back (7th row, 1st column) views
-                    const frontSlice = getSpritesheetSlice(ctx, img, 4, 0, false); // 5th row (index 4)
-                    const backSlice = getSpritesheetSlice(ctx, img, 6, 0, true);   // 7th row (index 6), flipped horizontally
-                    
-                    const depth = parseInt(document.getElementById('depthInput').value);
-                    const voxels = createVoxelModel(frontSlice, backSlice, depth);
-                    
-                    // Initialize Three.js scene if not already done
-                    if (!scene) {
-                        initThreeJS();
-                    } else {
-                        // Clear existing mesh
-                        while(scene.children.length > 0){ 
-                            scene.remove(scene.children[0]); 
-                        }
-                    }
-                    
-                    const voxelMesh = createVoxelMesh(voxels);
-                    scene.add(voxelMesh);
+            // Only set camera position on initial load
+            if (!scene.userData.cameraInitialized) {
+                const size = voxelMesh.userData.size;
+                const maxDimension = Math.max(size.x, size.y, size.z);
+                const fov = camera.fov * (Math.PI / 180);
+                const cameraDistance = Math.abs(maxDimension / Math.sin(fov / 2)) * 1.5;
 
-                    // Calculate optimal camera position based on model size
-                    const size = voxelMesh.userData.size;
-                    const maxDimension = Math.max(size.x, size.y, size.z);
-                    const fov = camera.fov * (Math.PI / 180);
-                    const cameraDistance = Math.abs(maxDimension / Math.sin(fov / 2)) * 1.5; // 1.5 for some padding
+                camera.position.set(cameraDistance * 0.5, cameraDistance * 0.5, cameraDistance * 0.5);
+                camera.lookAt(0, 0, 0);
+                controls.target.set(0, 0, 0);
+                controls.update();
+                
+                scene.userData.cameraInitialized = true;
+            }
+        }
 
-                    camera.position.set(cameraDistance * 0.5, cameraDistance * 0.5, cameraDistance * 0.5);
-                    camera.lookAt(0, 0, 0);
-                    controls.target.set(0, 0, 0);
-                    controls.update();
-                };
-                img.src = event.target.result;
+        function startAnimation(img) {
+            if (animationInterval) {
+                clearInterval(animationInterval);
+            }
+            
+            if (isWalking) {
+                currentFrame = 0;
+                animationInterval = setInterval(() => {
+                    processSpritesheetFrame(img, currentFrame);
+                    currentFrame = (currentFrame + 1) % SPRITE_COLS;
+                }, 1000 / FRAME_RATE);
+            } else {
+                processSpritesheetFrame(img);
+            }
+        }
+
+        function loadBroker(brokerId) {
+            const img = new Image();
+            img.crossOrigin = "anonymous";  // Add this line to enable CORS
+            img.onload = function() {
+                startAnimation(img);
             };
-            reader.readAsDataURL(file);
-        });
+            img.onerror = function() {
+                console.error('Failed to load broker image:', brokerId);
+                alert('Failed to load broker image ' + brokerId);
+            };
+            img.src = `https://cb-media.sfo3.cdn.digitaloceanspaces.com/pixelbrokers/current/sprites/${brokerId}.png`;
+        }
 
-        document.getElementById('depthInput').addEventListener('change', function() {
-            // Trigger spritesheet processing again if an image is loaded
-            const spritesheetInput = document.getElementById('spritesheetInput');
-            if (spritesheetInput.files.length > 0) {
-                const event = new Event('change');
-                spritesheetInput.dispatchEvent(event);
+        document.getElementById('loadBrokerButton').addEventListener('click', function() {
+            const brokerId = parseInt(document.getElementById('brokerIdInput').value);
+            if (brokerId >= 0 && brokerId <= 10000) {
+                loadBroker(brokerId);
+            } else {
+                alert('Please enter a broker ID between 0 and 10000');
             }
         });
 
-        // Add preload button functionality
-        document.getElementById('preloadButton').addEventListener('click', function() {
-            // Create an Image object and load the test image
-            const img = new Image();
-            img.onload = function() {
-                const canvas = document.getElementById('workCanvas');
-                const ctx = canvas.getContext('2d');
-                canvas.width = img.width;
-                canvas.height = img.height;
-                ctx.drawImage(img, 0, 0);
+        document.getElementById('depthInput').addEventListener('change', function() {
+            // Reload current broker if one is loaded
+            const brokerId = parseInt(document.getElementById('brokerIdInput').value);
+            if (brokerId >= 0 && brokerId <= 10000) {
+                loadBroker(brokerId);
+            }
+        });
 
-                // Get front and back views
-                const frontSlice = getSpritesheetSlice(ctx, img, 4, 0, false);
-                const backSlice = getSpritesheetSlice(ctx, img, 6, 0, true);
-                
-                const depth = parseInt(document.getElementById('depthInput').value);
-                const voxels = createVoxelModel(frontSlice, backSlice, depth);
-                
-                // Initialize Three.js scene if not already done
-                if (!scene) {
-                    initThreeJS();
-                } else {
-                    // Clear existing mesh
-                    while(scene.children.length > 0){ 
-                        scene.remove(scene.children[0]); 
-                    }
-                }
-                
-                const voxelMesh = createVoxelMesh(voxels);
-                scene.add(voxelMesh);
-            };
-            img.src = 'sheets/3.png';
+        // Load initial broker (0)
+        loadBroker(0);
+
+        // Add toggle animation functionality
+        document.getElementById('toggleAnimation').addEventListener('click', function() {
+            isWalking = !isWalking;
+            this.textContent = isWalking ? 'Stop Walking' : 'Start Walking';
+            
+            // Reload current broker with new animation state
+            const brokerId = parseInt(document.getElementById('brokerIdInput').value);
+            if (brokerId >= 0 && brokerId <= 10000) {
+                loadBroker(brokerId);
+            }
         });
     </script>
 </body>
