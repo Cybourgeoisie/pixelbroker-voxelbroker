@@ -37,6 +37,32 @@ async function processImage(inputPath) {
             return channels === 4 && data[index + 3] < OPACITY_THRESHOLD;
         };
 
+        // Helper function to check if a pixel is on an edge (touches transparency)
+        const isEdgePixel = (x, y) => {
+            // Check all 8 surrounding pixels
+            const directions = [
+                [-1, -1], [0, -1], [1, -1],
+                [-1,  0],          [1,  0],
+                [-1,  1], [0,  1], [1,  1]
+            ];
+
+            for (const [dx, dy] of directions) {
+                const newX = x + dx;
+                const newY = y + dy;
+                
+                // Skip if outside image bounds
+                if (newX < 0 || newX >= width || newY < 0 || newY >= height) {
+                    continue;
+                }
+
+                const neighborIndex = getPixelIndex(newX, newY);
+                if (isEffectivelyTransparent(neighborIndex)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
         // First pass: collect all unique colors and calculate their luminance
         const colorMap = new Map();
         for (let y = 0; y < height; y++) {
@@ -85,13 +111,20 @@ async function processImage(inputPath) {
                 const i = getPixelIndex(x, y);
                 
                 if (!isEffectivelyTransparent(i)) {
-                    const key = `${data[i]},${data[i + 1]},${data[i + 2]}`;
-                    const grayValue = colorToGrayMap.get(key);
-                    
-                    // Set RGB values to the mapped gray value
-                    outputBuffer[i] = grayValue;     // R
-                    outputBuffer[i + 1] = grayValue; // G
-                    outputBuffer[i + 2] = grayValue; // B
+                    if (isEdgePixel(x, y)) {
+                        // Set edge pixels to black
+                        outputBuffer[i] = 0;     // R
+                        outputBuffer[i + 1] = 0; // G
+                        outputBuffer[i + 2] = 0; // B
+                    } else {
+                        const key = `${data[i]},${data[i + 1]},${data[i + 2]}`;
+                        const grayValue = colorToGrayMap.get(key);
+                        
+                        // Set RGB values to the mapped gray value
+                        outputBuffer[i] = grayValue;     // R
+                        outputBuffer[i + 1] = grayValue; // G
+                        outputBuffer[i + 2] = grayValue; // B
+                    }
                     
                     // Set alpha to fully opaque for non-transparent pixels
                     if (channels === 4) {
