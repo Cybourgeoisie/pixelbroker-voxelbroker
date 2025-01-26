@@ -52,6 +52,46 @@
         label {
             margin-right: 10px;
         }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+            margin: 0 10px;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #333;
+            transition: .4s;
+            border-radius: 34px;
+        }
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: #fff;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .toggle-slider {
+            background-color: #444;
+        }
+        input:checked + .toggle-slider:before {
+            transform: translateX(26px);
+        }
     </style>
 </head>
 <body>
@@ -68,6 +108,10 @@
         <div class="input-group">
             <label>Depth Map: </label>
             <input type="file" id="depthMapInput" accept="image/*">
+            <label class="toggle-switch">
+                <input type="checkbox" id="depthMapToggle" checked>
+                <span class="toggle-slider"></span>
+            </label>
             <span>(Defaults to ./source/female_depth.png)</span>
         </div>
         <div class="input-group">
@@ -174,34 +218,63 @@
 
             // Helper to get depth from grayscale value
             function getDepthFromGrayscale(pixel, maxDepth) {
-                if (!pixel || pixel.a === 0) return 1; // Default depth for transparent areas
+                const depthMapEnabled = document.getElementById('depthMapToggle').checked;
+
+                if (!depthMapEnabled) {
+                    return maxDepth; // Return max depth when depth map is disabled
+                }
+                
+                if (!pixel || pixel.a < 128) return 1; // Default depth for transparent areas
                 
                 const grayscale = (pixel.r + pixel.g + pixel.b) / 3;
-                
-                // If it's black (or very close to black), return 1
-                if (grayscale < 5) return 1;
-                
-                // For all other colors, evenly distribute between 2 and maxDepth
+
+                // For all colors, evenly distribute between 1 and maxDepth
                 const normalizedValue = (grayscale - 5) / (255 - 5);
-                return Math.max(2, Math.round(2 + (normalizedValue * (maxDepth - 2))));
+                return Math.max(1, Math.round(1 + (normalizedValue * (maxDepth - 1))));
             }
 
             // Helper to find nearest non-transparent neighbor's depth
             function getNearestNeighborDepth(x, y, row, col) {
+                const depthMapEnabled = document.getElementById('depthMapToggle').checked;
+                if (!depthMapEnabled) {
+                    return maxDepth; // Return max depth when depth map is disabled
+                }
                 if (!depthMapData) return 1;
                 const spriteWidth = Math.floor(depthMapData.width / SPRITE_COLS);
                 const spriteHeight = Math.floor(depthMapData.height / SPRITE_ROWS);
                 const baseX = Math.floor(col * spriteWidth + x);
                 const baseY = Math.floor(row * spriteHeight + y);
+
+                // Search in expanding circles until we find a non-transparent depth pixel
+                let radius = 1;
+                const maxRadius = Math.max(spriteWidth, spriteHeight); // Don't search beyond sprite bounds
                 
-                const directions = [[-1,0], [1,0], [0,-1], [0,1], [-1,-1], [-1,1], [1,-1], [1,1]];
-                for (let [dx, dy] of directions) {
-                    const pixel = getPixel(depthMapData, baseX + dx, baseY + dy);
-                    if (pixel && pixel.a > 0) {
-                        return getDepthFromGrayscale(pixel, maxDepth);
+                while (radius <= maxRadius) {
+                    // Check all pixels at current radius
+                    for (let dx = -radius; dx <= radius; dx++) {
+                        for (let dy = -radius; dy <= radius; dy++) {
+                            // Only check pixels exactly at radius distance (creates a diamond pattern)
+                            if (Math.sqrt(Math.abs(dx) + Math.abs(dy)) <= radius && Math.sqrt(Math.abs(dx) + Math.abs(dy)) >= radius - 1) {
+                                const checkX = baseX + dx;
+                                const checkY = baseY + dy;
+                                
+                                // Ensure we stay within the current sprite cell
+                                if (checkX >= col * spriteWidth && 
+                                    checkX < (col + 1) * spriteWidth && 
+                                    checkY >= row * spriteHeight && 
+                                    checkY < (row + 1) * spriteHeight) {
+                                    
+                                    const pixel = getPixel(depthMapData, checkX, checkY);
+                                    if (pixel && pixel.a > 128) {
+                                        return getDepthFromGrayscale(pixel, maxDepth);
+                                    }
+                                }
+                            }
+                        }
                     }
+                    radius++;
                 }
-                return 1; // Default if no neighbors found
+                return 1; // Default if no neighbors found within sprite bounds
             }
 
             // Helper to get the corresponding depth map pixel for a sprite position
@@ -242,7 +315,7 @@
                         if (frontPixel?.a > 0) {
                             const frontDepth = frontDepthPixel?.a > 0 ? 
                                 getDepthFromGrayscale(frontDepthPixel, maxDepth) : 
-                                getNearestNeighborDepth(x, y, frontDepthPixel);
+                                getNearestNeighborDepth(x, y, isWalking ? 0 : 4, isWalking ? currentFrame : 0);
                             frontZ = centerZ - frontDepth;
                         }
 
@@ -250,7 +323,7 @@
                         if (backPixel?.a > 0) {
                             const backDepth = backDepthPixel?.a > 0 ? 
                                 getDepthFromGrayscale(backDepthPixel, maxDepth) : 
-                                getNearestNeighborDepth(x, y, backDepthPixel);
+                                getNearestNeighborDepth(x, y, isWalking ? 2 : 6, isWalking ? currentFrame : 0);
                             backZ = centerZ + backDepth;
                         }
 
@@ -492,6 +565,15 @@
                     img.src = event.target.result;
                 };
                 reader.readAsDataURL(e.target.files[0]);
+            }
+        });
+
+        // Add refresh depth map functionality
+        document.getElementById('depthMapToggle').addEventListener('change', function() {
+            // Reload current broker with new depth map setting
+            const brokerId = parseInt(document.getElementById('brokerIdInput').value);
+            if (brokerId >= 0 && brokerId <= 10000) {
+                loadBroker(brokerId);
             }
         });
 
