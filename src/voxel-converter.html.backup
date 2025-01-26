@@ -63,12 +63,11 @@
         </div>
         <div class="input-group">
             <label>Max Depth (number of voxels): </label>
-            <input type="number" id="depthInput" value="4" min="1" max="20">
+            <input type="number" id="depthInput" value="3" min="1" max="20">
         </div>
         <div class="input-group">
-            <label>Depth Map: </label>
+            <label>Custom Depth Map: </label>
             <input type="file" id="depthMapInput" accept="image/*">
-            <span>(Defaults to ./source/female_depth.png)</span>
         </div>
         <div class="input-group">
             <label>Animation: </label>
@@ -84,6 +83,24 @@
         let isWalking = false;
         let currentFrame = 0;
         let animationInterval;
+        let depthMapImage = null;
+        
+        // Load default depth map
+        function loadDefaultDepthMap() {
+            const defaultDepthMap = new Image();
+            defaultDepthMap.onload = function() {
+                depthMapImage = defaultDepthMap;
+                // Reload current broker if one is loaded
+                const brokerId = parseInt(document.getElementById('brokerIdInput').value);
+                if (brokerId >= 0 && brokerId <= 10000) {
+                    loadBroker(brokerId);
+                }
+            };
+            defaultDepthMap.src = 'source/female_depth.png';
+        }
+        
+        // Load default depth map on startup
+        loadDefaultDepthMap();
         const FRAME_RATE = 4; // frames per second
         const SPRITE_ROWS = 8;
         const SPRITE_COLS = 6;
@@ -154,14 +171,13 @@
             return tempCtx.getImageData(0, 0, spriteWidth, spriteHeight);
         }
 
-        function createVoxelModel(frontData, backData, maxDepth, depthMapData) {
+        function createVoxelModel(frontData, backData, maxDepth) {
             const voxels = [];
             const spriteWidth = frontData.width;
             const spriteHeight = frontData.height;
             
             // Helper to get pixel data
             function getPixel(imageData, x, y) {
-                if (!imageData || x < 0 || y < 0 || x >= imageData.width || y >= imageData.height) return null;
                 const index = (y * imageData.width + x) * 4;
                 return {
                     r: imageData.data[index],
@@ -170,68 +186,115 @@
                     a: imageData.data[index + 3]
                 };
             }
-
-            // Helper to get depth from grayscale value
-            function getDepthFromGrayscale(pixel, maxDepth) {
-                if (!pixel || pixel.a === 0) return 1; // Default depth for transparent areas
-                const grayscale = (pixel.r + pixel.g + pixel.b) / 3;
-                return Math.max(1, Math.round((grayscale / 255) * maxDepth));
-            }
-
-            // Helper to find nearest non-transparent neighbor's depth
-            function getNearestNeighborDepth(x, y, depthMapData) {
-                const directions = [[-1,0], [1,0], [0,-1], [0,1], [-1,-1], [-1,1], [1,-1], [1,1]];
-                for (let [dx, dy] of directions) {
-                    const pixel = getPixel(depthMapData, x + dx, y + dy);
-                    if (pixel && pixel.a > 0) {
-                        return getDepthFromGrayscale(pixel, maxDepth);
-                    }
-                }
-                return 1; // Default if no neighbors found
+            
+            // Create cached depth map data
+            let depthMapData = null;
+            let depthMapScaleX = 1;
+            let depthMapScaleY = 1;
+            
+            if (depthMapImage) {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = depthMapImage.width;
+                canvas.height = depthMapImage.height;
+                ctx.drawImage(depthMapImage, 0, 0);
+                depthMapData = ctx.getImageData(0, 0, depthMapImage.width, depthMapImage.height);
+                depthMapScaleX = depthMapImage.width / spriteWidth;
+                depthMapScaleY = depthMapImage.height / spriteHeight;
             }
             
-            // Create voxels for each pixel
+            // Get depth from depth map
+            function getDepth(x, y) {
+                if (!depthMapData) return 1;
+                
+                // Scale coordinates to match depth map dimensions
+                const depthX = Math.floor(x * depthMapScaleX);
+                const depthY = Math.floor(y * depthMapScaleY);
+                
+                // Get pixel data from cached depth map
+                const index = (depthY * depthMapData.width + depthX) * 4;
+                const grayscale = depthMapData.data[index];
+                
+                // Use grayscale value to determine additional depth (0-255 -> 0-(maxDepth-1))
+                // Add 1 to ensure minimum depth of 1
+                return 1 + Math.floor((grayscale / 255) * (maxDepth - 1));
+            }
+            
+            // Helper to get neighbor depth
+            function getNeighborDepth(x, y, pixelDepths, side) {
+                const neighbors = [
+                    {x: x-1, y: y}, {x: x+1, y: y},
+                    {x: x, y: y-1}, {x: x, y: y+1}
+                ];
+                
+                for (const neighbor of neighbors) {
+                    if (neighbor.x >= 0 && neighbor.x < spriteWidth &&
+                        neighbor.y >= 0 && neighbor.y < spriteHeight) {
+                        const key = `${neighbor.x},${neighbor.y}`;
+                        if (pixelDepths.has(key)) {
+                            return pixelDepths.get(key)[side];
+                        }
+                    }
+                }
+                return 1;
+            }
+            
+            // Store pixel depths for neighbor lookups
+            const pixelDepths = new Map();
+            
+            // First pass: calculate depths for non-transparent pixels
             for (let y = 0; y < spriteHeight; y++) {
                 for (let x = 0; x < spriteWidth; x++) {
                     const frontPixel = getPixel(frontData, x, y);
                     const backPixel = getPixel(backData, x, y);
-                    const depthPixel = getPixel(depthMapData, x, y);
                     
-                    if (frontPixel?.a > 0 || backPixel?.a > 0) {
-                        const pixelDepth = depthPixel?.a > 0 ? 
-                            getDepthFromGrayscale(depthPixel, maxDepth) : 
-                            getNearestNeighborDepth(x, y, depthMapData);
+                    if (frontPixel.a > 0 || backPixel.a > 0) {
+                        const frontDepth = frontPixel.a > 0 ? getDepth(x, y) : 1;
+                        const backDepth = backPixel.a > 0 ? getDepth(x, y) : 1;
+                        pixelDepths.set(`${x},${y}`, {front: frontDepth, back: backDepth});
+                    }
+                }
+            }
+            
+            // Second pass: create voxels with inherited depths for transparent areas
+            for (let y = 0; y < spriteHeight; y++) {
+                for (let x = 0; x < spriteWidth; x++) {
+                    const frontPixel = getPixel(frontData, x, y);
+                    const backPixel = getPixel(backData, x, y);
+                    
+                    if (frontPixel.a > 0 || backPixel.a > 0) {
+                        const key = `${x},${y}`;
+                        const depths = pixelDepths.has(key) ? 
+                                     pixelDepths.get(key) : 
+                                     {
+                                         front: getNeighborDepth(x, y, pixelDepths, 'front'),
+                                         back: getNeighborDepth(x, y, pixelDepths, 'back')
+                                     };
                         
-                        const centerZ = Math.floor(maxDepth / 2);
-                        let frontZ = centerZ;
-                        let backZ = centerZ;
-
-                        // Extend front and back based on pixel depth
-                        if (frontPixel?.a > 0) {
-                            frontZ = centerZ - pixelDepth;
-                        }
-                        if (backPixel?.a > 0) {
-                            backZ = centerZ + pixelDepth;
-                        }
-
-                        // Create voxels from front to back
-                        for (let z = frontZ; z <= backZ; z++) {
-                            const t = (z - frontZ) / (backZ - frontZ || 1);
-                            const pixel = frontPixel?.a === 0 ? backPixel : 
-                                        backPixel?.a === 0 ? frontPixel :
-                                        {
-                                            r: Math.round(frontPixel.r * (1 - t) + backPixel.r * t),
-                                            g: Math.round(frontPixel.g * (1 - t) + backPixel.g * t),
-                                            b: Math.round(frontPixel.b * (1 - t) + backPixel.b * t),
-                                            a: Math.round(frontPixel.a * (1 - t) + backPixel.a * t)
-                                        };
-                            
-                            if (pixel?.a > 0) {
+                        // Calculate total depth and center position
+                        const totalDepth = depths.front + depths.back - 1; // -1 because center voxel counts for both
+                        const centerOffset = Math.floor(totalDepth/2);
+                        
+                        // Create voxels for front half (only if front pixel is visible)
+                        if (frontPixel.a > 0) {
+                            for (let z = 0; z < depths.front; z++) {
                                 voxels.push({
                                     x: x,
                                     y: -y,
-                                    z: z,
-                                    color: `rgba(${pixel.r}, ${pixel.g}, ${pixel.b}, ${pixel.a / 255})`
+                                    z: -z,  // Negative z for front
+                                    color: `rgba(${frontPixel.r}, ${frontPixel.g}, ${frontPixel.b}, ${frontPixel.a / 255})`
+                                });
+                            }
+                        }
+                        
+                        // Create voxels for back half (only if back pixel is visible)
+                        if (backPixel.a > 0) {
+                            for (let z = 0; z < depths.back; z++) {
+                                voxels.push({
+                                    x: x,
+                                    y: -y,
+                                    z: z,  // Positive z for back
+                                    color: `rgba(${backPixel.r}, ${backPixel.g}, ${backPixel.b}, ${backPixel.a / 255})`
                                 });
                             }
                         }
@@ -310,27 +373,6 @@
             return mesh;
         }
 
-        let depthMapImage = null;
-        let depthMapData = null;
-
-        function loadDefaultDepthMap() {
-            return new Promise((resolve, reject) => {
-                const depthMap = new Image();
-                depthMap.onload = function() {
-                    const canvas = document.createElement('canvas');
-                    canvas.width = depthMap.width;
-                    canvas.height = depthMap.height;
-                    const ctx = canvas.getContext('2d');
-                    ctx.drawImage(depthMap, 0, 0);
-                    depthMapImage = depthMap;
-                    depthMapData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                    resolve();
-                };
-                depthMap.onerror = reject;
-                depthMap.src = './source/female_depth.png';
-            });
-        }
-
         function processSpritesheetFrame(img, frameIndex = null) {
             const canvas = document.getElementById('workCanvas');
             const ctx = canvas.getContext('2d');
@@ -350,8 +392,8 @@
                 backSlice = getSpritesheetSlice(ctx, img, 6, 0, true);
             }
             
-            const maxDepth = parseInt(document.getElementById('depthInput').value);
-            const voxels = createVoxelModel(frontSlice, backSlice, maxDepth, depthMapData);
+            const depth = parseInt(document.getElementById('depthInput').value);
+            const voxels = createVoxelModel(frontSlice, backSlice, depth);
             
             // Initialize Three.js scene if not already done
             if (!scene) {
@@ -428,22 +470,16 @@
             }
         });
 
-        // Handle depth map file input
+        // Handle custom depth map upload
         document.getElementById('depthMapInput').addEventListener('change', function(e) {
-            if (e.target.files && e.target.files[0]) {
+            const file = e.target.files[0];
+            if (file) {
                 const reader = new FileReader();
                 reader.onload = function(event) {
                     const img = new Image();
                     img.onload = function() {
-                        const canvas = document.createElement('canvas');
-                        canvas.width = img.width;
-                        canvas.height = img.height;
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0);
                         depthMapImage = img;
-                        depthMapData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                        
-                        // Reload current broker with new depth map
+                        // Reload current broker
                         const brokerId = parseInt(document.getElementById('brokerIdInput').value);
                         if (brokerId >= 0 && brokerId <= 10000) {
                             loadBroker(brokerId);
@@ -451,17 +487,14 @@
                     };
                     img.src = event.target.result;
                 };
-                reader.readAsDataURL(e.target.files[0]);
+                reader.readAsDataURL(file);
+            } else {
+                loadDefaultDepthMap();
             }
         });
 
-        // Load default depth map and initial broker
-        loadDefaultDepthMap().then(() => {
-            loadBroker(0);
-        }).catch(error => {
-            console.error('Failed to load default depth map:', error);
-            loadBroker(0); // Load broker anyway, will use default depth
-        });
+        // Load initial broker (0)
+        loadBroker(0);
 
         // Add toggle animation functionality
         document.getElementById('toggleAnimation').addEventListener('click', function() {
