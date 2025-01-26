@@ -162,7 +162,8 @@
             // Helper to get pixel data
             function getPixel(imageData, x, y) {
                 if (!imageData || x < 0 || y < 0 || x >= imageData.width || y >= imageData.height) return null;
-                const index = (y * imageData.width + x) * 4;
+                const index = Math.floor((y * imageData.width + x) * 4);
+                if (index < 0 || index >= imageData.data.length - 3) return null;
                 return {
                     r: imageData.data[index],
                     g: imageData.data[index + 1],
@@ -186,15 +187,31 @@
             }
 
             // Helper to find nearest non-transparent neighbor's depth
-            function getNearestNeighborDepth(x, y, depthMapData) {
+            function getNearestNeighborDepth(x, y, row, col) {
+                if (!depthMapData) return 1;
+                const spriteWidth = Math.floor(depthMapData.width / SPRITE_COLS);
+                const spriteHeight = Math.floor(depthMapData.height / SPRITE_ROWS);
+                const baseX = Math.floor(col * spriteWidth + x);
+                const baseY = Math.floor(row * spriteHeight + y);
+                
                 const directions = [[-1,0], [1,0], [0,-1], [0,1], [-1,-1], [-1,1], [1,-1], [1,1]];
                 for (let [dx, dy] of directions) {
-                    const pixel = getPixel(depthMapData, x + dx, y + dy);
+                    const pixel = getPixel(depthMapData, baseX + dx, baseY + dy);
                     if (pixel && pixel.a > 0) {
                         return getDepthFromGrayscale(pixel, maxDepth);
                     }
                 }
                 return 1; // Default if no neighbors found
+            }
+
+            // Helper to get the corresponding depth map pixel for a sprite position
+            function getDepthMapPixel(x, y, row, col) {
+                if (!depthMapData) return null;
+                const spriteWidth = Math.floor(depthMapData.width / SPRITE_COLS);
+                const spriteHeight = Math.floor(depthMapData.height / SPRITE_ROWS);
+                const depthX = Math.floor(col * spriteWidth + x);
+                const depthY = Math.floor(row * spriteHeight + y);
+                return getPixel(depthMapData, depthX, depthY);
             }
             
             // Create voxels for each pixel
@@ -202,23 +219,39 @@
                 for (let x = 0; x < spriteWidth; x++) {
                     const frontPixel = getPixel(frontData, x, y);
                     const backPixel = getPixel(backData, x, y);
-                    const depthPixel = getPixel(depthMapData, x, y);
+                    
+                    // Get depth map pixels from the corresponding positions in the spritesheet
+                    let frontDepthPixel, backDepthPixel;
+                    
+                    if (isWalking && currentFrame !== null) {
+                        // Walking animation - use row 1 for front (index 0) and row 3 for back (index 2)
+                        frontDepthPixel = getDepthMapPixel(x, y, 0, currentFrame);
+                        backDepthPixel = getDepthMapPixel(x, y, 2, currentFrame);
+                    } else {
+                        // Standing pose - use row 5 for front (index 4) and row 7 for back (index 6)
+                        frontDepthPixel = getDepthMapPixel(x, y, 4, 0);
+                        backDepthPixel = getDepthMapPixel(x, y, 6, 0);
+                    }
                     
                     if (frontPixel?.a > 0 || backPixel?.a > 0) {
-                        const pixelDepth = depthPixel?.a > 0 ? 
-                            getDepthFromGrayscale(depthPixel, maxDepth) : 
-                            getNearestNeighborDepth(x, y, depthMapData);
-                        
                         const centerZ = Math.floor(maxDepth / 2);
                         let frontZ = centerZ;
                         let backZ = centerZ;
 
-                        // Extend front and back based on pixel depth
+                        // Calculate front depth
                         if (frontPixel?.a > 0) {
-                            frontZ = centerZ - pixelDepth;
+                            const frontDepth = frontDepthPixel?.a > 0 ? 
+                                getDepthFromGrayscale(frontDepthPixel, maxDepth) : 
+                                getNearestNeighborDepth(x, y, frontDepthPixel);
+                            frontZ = centerZ - frontDepth;
                         }
+
+                        // Calculate back depth
                         if (backPixel?.a > 0) {
-                            backZ = centerZ + pixelDepth;
+                            const backDepth = backDepthPixel?.a > 0 ? 
+                                getDepthFromGrayscale(backDepthPixel, maxDepth) : 
+                                getNearestNeighborDepth(x, y, backDepthPixel);
+                            backZ = centerZ + backDepth;
                         }
 
                         // Create voxels from front to back
