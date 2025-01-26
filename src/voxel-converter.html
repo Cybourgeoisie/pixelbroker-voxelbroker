@@ -174,8 +174,15 @@
             // Helper to get depth from grayscale value
             function getDepthFromGrayscale(pixel, maxDepth) {
                 if (!pixel || pixel.a === 0) return 1; // Default depth for transparent areas
+                
                 const grayscale = (pixel.r + pixel.g + pixel.b) / 3;
-                return Math.max(1, Math.round((grayscale / 255) * maxDepth));
+                
+                // If it's black (or very close to black), return 1
+                if (grayscale < 5) return 1;
+                
+                // For all other colors, evenly distribute between 2 and maxDepth
+                const normalizedValue = (grayscale - 5) / (255 - 5);
+                return Math.max(2, Math.round(2 + (normalizedValue * (maxDepth - 2))));
             }
 
             // Helper to find nearest non-transparent neighbor's depth
